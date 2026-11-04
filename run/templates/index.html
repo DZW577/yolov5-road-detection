@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>道路病害检测系统</title>
+    <style>
+        body { margin: 0; padding: 0; background-color: #000; overflow: hidden; }
+        .container { position: relative; width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        /* 让 Canvas 绝对定位覆盖在视频上，CSS 负责拉伸铺满，JS 负责精确坐标计算 */
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 10; pointer-events: none; }
+        #loading { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); color: #fff; background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 5px; display: none; z-index: 20; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+        <div id="loading">检测中...</div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const loadingText = document.getElementById('loading');
+
+        // 隐藏用于截图的 canvas
+        const hiddenCanvas = document.createElement('canvas');
+        const hiddenCtx = hiddenCanvas.getContext('2d');
+
+        // 1. 开启后置摄像头
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment' }, // 强制后置
+                    audio: false
+                });
+                video.srcObject = stream;
+
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        resolve(video);
+                    };
+                });
+            } catch (error) {
+                alert("无法访问摄像头：" + error.message);
+            }
+        }
+
+        // 2. 发送画面到后端
+        async function sendFrame() {
+            if (video.readyState !== 4) return; // 视频未就绪
+
+            // 设置隐藏画布大小与视频一致
+            hiddenCanvas.width = video.videoWidth;
+            hiddenCanvas.height = video.videoHeight;
+
+            // 截图
+            hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+            const base64Img = hiddenCanvas.toDataURL('image/jpeg', 0.7); // 压缩质量
+
+            loadingText.style.display = 'block';
+
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: base64Img })
+                });
+                const result = await response.json();
+
+                if (result.status === 'success') {
+                    drawBoxes(result.detections);
+                }
+            } catch (e) {
+                console.error("请求失败", e);
+            }
+
+            loadingText.style.display = 'none';
+        }
+
+        // 3. 在 Canvas 上画框
+        function drawBoxes(detections) {
+            // 🌟 核心修复：强制 Canvas 内部分辨率与摄像头原始像素一模一样！
+            if (canvas.width !== video.videoWidth) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height); // 清空上一帧
+
+            detections.forEach(det => {
+                // 🌟 核心修复：因为尺寸一致了，不需要任何缩放计算，直接用绝对坐标！
+                const x = det.xmin;
+                const y = det.ymin;
+                const w = det.xmax - det.xmin;
+                const h = det.ymax - det.ymin;
+
+                // 画框 (加粗了一点)
+                ctx.strokeStyle = '#00FF00';
+                ctx.lineWidth = 4;
+                ctx.strokeRect(x, y, w, h);
+
+                // 画标签背景
+                const label = `${det.class_name} ${det.confidence.toFixed(2)}`;
+                ctx.font = 'bold 24px Microsoft YaHei'; // 字体放大适配手机屏
+                const textWidth = ctx.measureText(label).width;
+                ctx.fillStyle = 'rgba(0, 255, 0, 0.8)';
+                ctx.fillRect(x, y - 30, textWidth + 15, 30);
+
+                // 画文字 (黑色文字，绿色底)
+                ctx.fillStyle = '#000000';
+                ctx.fillText(label, x + 5, y - 6);
+            });
+        }
+
+        // 启动
+        (async function main() {
+            await setupCamera();
+            // 每 200 毫秒发送一次画面
+            setInterval(sendFrame, 200);
+        })();
+    </script>
+</body>
+</html>

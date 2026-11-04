@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>YOLOv5 道路病害检测</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 15px; background: #f4f6f8; text-align: center; }
+        .image-container { position: relative; width: 100%; min-height: 250px; background: #fff; border: 2px dashed #ccc; margin-bottom: 15px; display: flex; justify-content: center; align-items: center; border-radius: 12px; overflow: hidden; }
+        .image-container img { max-width: 100%; max-height: 350px; display: none; object-fit: contain; }
+        .placeholder { color: #999; font-size: 16px; padding: 20px; }
+        .label { font-weight: bold; margin-bottom: 8px; display: block; text-align: left; color: #333; font-size: 18px; }
+        .btn-group { display: flex; flex-direction: column; gap: 12px; margin-top: 20px; }
+        button, input[type="file"]::file-selector-button { width: 100%; padding: 16px; font-size: 18px; font-weight: bold; border: none; border-radius: 10px; background: #007bff; color: white; cursor: pointer; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        button:disabled { background: #a0c4ff; }
+        #detect-btn { background: #28a745; }
+        #detect-btn:disabled { background: #a3e4b8; }
+        input[type="file"] { display: none; }
+    </style>
+</head>
+<body>
+    <div class="label">📸 原图 / 拍照</div>
+    <div class="image-container" id="original-container" onclick="document.getElementById('file-input').click()">
+        <span class="placeholder" id="original-placeholder">点击此处拍照或从相册选择</span>
+        <img id="original-img" alt="原图">
+    </div>
+
+    <div class="label">🎯 检测结果</div>
+    <div class="image-container">
+        <span class="placeholder" id="result-placeholder">等待检测...</span>
+        <img id="result-img" alt="结果图">
+    </div>
+
+    <div class="btn-group">
+        <!-- 🌟 核心修复 1：删除了 capture="environment"，现在相册和拍照都能选了 -->
+        <input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)">
+        <button type="button" id="detect-btn" onclick="uploadImage()" disabled>开始检测</button>
+    </div>
+
+    <script>
+        let selectedFile = null;
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            selectedFile = file;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = document.getElementById('original-img');
+                img.src = e.target.result;
+                img.style.display = 'block';
+                document.getElementById('original-placeholder').style.display = 'none';
+
+                document.getElementById('result-img').style.display = 'none';
+                document.getElementById('result-placeholder').style.display = 'block';
+                document.getElementById('result-placeholder').innerText = '等待检测...';
+                document.getElementById('detect-btn').disabled = false;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        async function uploadImage() {
+            if (!selectedFile) return;
+
+            const btn = document.getElementById('detect-btn');
+            const resultImg = document.getElementById('result-img');
+            const resultPlaceholder = document.getElementById('result-placeholder');
+
+            btn.disabled = true;
+            btn.innerText = '压缩并检测中...';
+            resultImg.style.display = 'none';
+            resultPlaceholder.style.display = 'block';
+            resultPlaceholder.innerText = 'AI 正在分析，请稍候...';
+
+            const reader = new FileReader();
+            reader.onload = function (e) {
+                const img = new Image();
+                img.onload = async function () {
+                    const canvas = document.createElement('canvas');
+                    let width = img.width;
+                    let height = img.height;
+
+                    // 🌟 核心修复 2：提高分辨率至 1920，保留更多的特征细节
+                    const max_size = 1920;
+                    if (width > height && width > max_size) {
+                        height *= max_size / width;
+                        width = max_size;
+                    } else if (height > max_size) {
+                        width *= max_size / height;
+                        height = max_size;
+                    }
+
+                    canvas.width = width;
+                    canvas.height = height;
+                    canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+
+                    // 🌟 核心修复 3：提高压缩质量至 0.95，让图像更清晰
+                    canvas.toBlob(async function (blob) {
+                        const formData = new FormData();
+                        formData.append('file', blob, 'compressed.jpg');
+
+                        try {
+                            const controller = new AbortController();
+                            // 提高分辨率后，文件变大，我们将超时时间延长至 20 秒
+                            const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+                            const response = await fetch('/predict', {
+                                method: 'POST',
+                                body: formData,
+                                signal: controller.signal
+                            });
+                            clearTimeout(timeoutId);
+
+                            if (response.ok) {
+                                const resBlob = await response.blob();
+                                resultImg.src = URL.createObjectURL(resBlob);
+                                resultImg.style.display = 'block';
+                                resultPlaceholder.style.display = 'none';
+                            } else {
+                                alert('服务端检测失败');
+                                resultPlaceholder.innerText = '检测失败';
+                            }
+                        } catch (error) {
+                            if (error.name === 'AbortError') {
+                                alert('请求超时！图片过大或网络不佳。');
+                                resultPlaceholder.innerText = '请求超时';
+                            } else {
+                                alert('网络请求失败: ' + error);
+                                resultPlaceholder.innerText = '网络异常';
+                            }
+                        } finally {
+                            btn.disabled = false;
+                            btn.innerText = '开始检测';
+                        }
+                    }, 'image/jpeg', 0.95); // 高画质导出
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(selectedFile);
+        }
+    </script>
+</body>
+</html>
